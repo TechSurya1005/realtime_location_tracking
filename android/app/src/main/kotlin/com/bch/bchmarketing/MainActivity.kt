@@ -1,4 +1,4 @@
-package com.example.realtime_location_tracking
+package com.bch.bchmarketing
 
 import io.flutter.embedding.android.FlutterActivity
 

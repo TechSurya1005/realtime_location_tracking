@@ -75,8 +75,18 @@ class _AdminLiveLocationListScreenState
           .eq('auth_uid', widget.userAuthUid)
           .single();
 
-      if (user['live_lat'] != null) {
-        await _processUpdate(user);
+      final double? lat = user['live_lat'] != null
+          ? (user['live_lat'] as num).toDouble()
+          : null;
+      final double? lng = user['live_lng'] != null
+          ? (user['live_lng'] as num).toDouble()
+          : null;
+
+      // Only update if user is live & has moved
+      if (lat != null && lng != null) {
+        if (_lastLat != lat || _lastLng != lng) {
+          await _processUpdate(user);
+        }
       }
     } catch (e) {
       debugPrint('ℹ️ Snapshot fetch error: $e');
@@ -440,18 +450,28 @@ class _AdminLiveLocationListScreenState
           ),
         ),
         Expanded(
-          child: _locationList.isEmpty
-              ? const Center(child: Text('Waiting for movement...'))
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: _locationList.length,
-                  itemBuilder: (context, index) {
-                    final displayIndex = _locationList.length - index;
-                    final entry = _locationList[index];
-                    final isLatest = index == 0;
-                    return _buildLocationCard(entry, displayIndex, isLatest);
-                  },
-                ),
+          child: RefreshIndicator(
+            onRefresh: _fetchLiveSnapshotFirst,
+            child: _locationList.isEmpty
+                ? ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: const [
+                      SizedBox(height: 200),
+                      Center(child: Text('Waiting for movement...')),
+                    ],
+                  )
+                : ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    itemCount: _locationList.length,
+                    itemBuilder: (context, index) {
+                      final displayIndex = _locationList.length - index;
+                      final entry = _locationList[index];
+                      final isLatest = index == 0;
+                      return _buildLocationCard(entry, displayIndex, isLatest);
+                    },
+                  ),
+          ),
         ),
       ],
     );

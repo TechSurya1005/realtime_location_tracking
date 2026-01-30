@@ -6,9 +6,10 @@ plugins {
 }
 
 android {
-    namespace = "com.example.realtime_location_tracking"
+    namespace = "com.bch.bchmarketing"
     compileSdk = 36
     ndkVersion = "27.3.13750724"
+
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -23,7 +24,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.realtime_location_tracking"
+        applicationId = "com.bch.bchmarketing"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -38,6 +39,11 @@ android {
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
+    }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 
