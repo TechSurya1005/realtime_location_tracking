@@ -57,38 +57,47 @@
 
         <!-- ================= BACKGROUND GEOLOCATION ================= -->
 
-        <!-- Foreground service (service name = location) -->
+        <!-- ================= NATIVE LOCATION ENGINE (CUSTOM) ================= -->
         <service
-            android:name="com.transistorsoft.locationmanager.service.TrackingService"
+            android:name=".location.LocationService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="location"
-            tools:replace="android:foregroundServiceType"/>
+            android:stopWithTask="false" />
 
-        <!-- Headless task service -->
-        <service
-            android:name="com.transistorsoft.flutter.backgroundgeolocation.HeadlessTask"
-            android:permission="android.permission.BIND_JOB_SERVICE"
-            android:enabled="true"
-            android:exported="false"
-            tools:ignore="Instantiatable"/>
-
-        <!-- Boot receiver -->
         <receiver
-            android:name="com.transistorsoft.flutter.backgroundgeolocation.BootReceiver"
+            android:name=".location.BootReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".location.FCMService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT"/>
+            </intent-filter>
+        </service>
+
+        <!-- ================= BACKGROUND GEOLOCATION (Review if still needed) ================= -->
+
+        <!-- Flutter -->
 
 
         <!-- Flutter -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2"/>
+            
+        <!-- Google Maps API Key -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyAgLX2BbulEREUca2Ab8B2stquroM_xgC4"/>
     </application>
 
 </manifest>

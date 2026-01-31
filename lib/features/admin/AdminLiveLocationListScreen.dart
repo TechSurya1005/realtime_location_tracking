@@ -1,12 +1,11 @@
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:realtime_location_tracking/app/theme/AppColors.dart';
-import 'package:realtime_location_tracking/app/theme/AppTextStyles.dart';
 
 class AdminLiveLocationListScreen extends StatefulWidget {
   final String userAuthUid;
@@ -32,14 +31,19 @@ class _AdminLiveLocationListScreenState
   bool _isLive = true;
   bool _waitingForFirstLocation = true;
 
-  // List to store all location updates - NO MAX LIMIT
-  final List<LocationEntry> _locationList = [];
+  // Google Maps
+  GoogleMapController? _mapController;
+  final Set<Marker> _markers = {};
 
-  // Track last location to avoid duplicates
-  double? _lastLat;
-  double? _lastLng;
-  static const double _minDistanceForNewEntry =
-      5.0; // 5 meters for "perfect" tracking
+  // Current stats
+  double? _currentLat;
+  double? _currentLng;
+  double? _currentAccuracy;
+  String _currentAddress = "Fetching location...";
+  DateTime? _lastUpdated;
+
+  // Track camera
+  bool _shouldFollowUser = true;
 
   @override
   void initState() {
@@ -75,19 +79,7 @@ class _AdminLiveLocationListScreenState
           .eq('auth_uid', widget.userAuthUid)
           .single();
 
-      final double? lat = user['live_lat'] != null
-          ? (user['live_lat'] as num).toDouble()
-          : null;
-      final double? lng = user['live_lng'] != null
-          ? (user['live_lng'] as num).toDouble()
-          : null;
-
-      // Only update if user is live & has moved
-      if (lat != null && lng != null) {
-        if (_lastLat != lat || _lastLng != lng) {
-          await _processUpdate(user);
-        }
-      }
+      _processUpdate(user);
     } catch (e) {
       debugPrint('ℹ️ Snapshot fetch error: $e');
     }
@@ -111,6 +103,9 @@ class _AdminLiveLocationListScreenState
         ? (data['live_accuracy'] as num).toDouble()
         : null;
     final String? updatedAtStr = data['live_updated_at'];
+    final DateTime? updatedTime = updatedAtStr != null
+        ? DateTime.tryParse(updatedAtStr)
+        : null;
 
     if (!live && lat == null) {
       if (mounted) {
@@ -124,136 +119,93 @@ class _AdminLiveLocationListScreenState
 
     if (lat == null || lng == null) return;
 
-    // Check if user moved enough to add new entry
-    bool shouldAddNewEntry = true;
-    if (_lastLat != null && _lastLng != null) {
-      final distance = _calculateDistance(_lastLat!, _lastLng!, lat, lng);
-      shouldAddNewEntry = distance > _minDistanceForNewEntry;
-    }
-
-    if (!shouldAddNewEntry) {
-      if (_locationList.isNotEmpty) {
-        if (mounted) {
-          setState(() {
-            _isLive = live;
-            final latestEntry = _locationList[0];
-            _locationList[0] = LocationEntry(
-              timestamp: updatedAtStr != null
-                  ? DateTime.tryParse(updatedAtStr) ?? DateTime.now()
-                  : DateTime.now(),
-              latitude: latestEntry.latitude,
-              longitude: latestEntry.longitude,
-              accuracy: accuracy ?? latestEntry.accuracy,
-              address: latestEntry.address,
-              street: latestEntry.street,
-              locality: latestEntry.locality,
-              city: latestEntry.city,
-              country: latestEntry.country,
-            );
-          });
-        }
+    // Skip if location hasn't effectively changed to save geocoding quota & renders
+    if (_currentLat == lat && _currentLng == lng) {
+      if (mounted && _lastUpdated != updatedTime) {
+        setState(() {
+          _lastUpdated = updatedTime;
+        });
       }
       return;
     }
 
     // Geocode to get human-readable address
-    Placemark? placemark;
+    String address = _currentAddress;
     try {
       final placemarks = await placemarkFromCoordinates(lat, lng);
-      placemark = placemarks.isNotEmpty ? placemarks.first : null;
+      if (placemarks.isNotEmpty) {
+        final p = placemarks.first;
+        final addressParts = <String>[];
+
+        String streetName = p.thoroughfare ?? '';
+        if (streetName.isEmpty || _isPlusCode(streetName)) {
+          if (!_isPlusCode(p.name)) {
+            streetName = p.name ?? '';
+          } else {
+            streetName = '';
+          }
+        }
+
+        if (streetName.isNotEmpty) addressParts.add(streetName);
+        if (p.subLocality?.isNotEmpty == true) addressParts.add(p.subLocality!);
+        if (p.locality?.isNotEmpty == true) addressParts.add(p.locality!);
+
+        if (addressParts.isNotEmpty) {
+          address = addressParts.join(', ');
+        }
+      }
     } catch (e) {
       debugPrint('⚠️ Geocoding error: $e');
     }
-
-    // Build cleaner address, avoiding Plus Codes (e.g. 7MHF+8H6)
-    final addressParts = <String>[];
-    final p = placemark;
-
-    if (p != null) {
-      // 1. Try to get a real street name (thoroughfare)
-      String streetName = p.thoroughfare ?? '';
-      if (streetName.isEmpty || _isPlusCode(streetName)) {
-        // Fallback to name but only if it's not a plus code
-        if (!_isPlusCode(p.name)) {
-          streetName = p.name ?? '';
-        } else {
-          streetName = '';
-        }
-      }
-
-      if (streetName.isNotEmpty) addressParts.add(streetName);
-      if (p.subLocality != null && p.subLocality!.isNotEmpty) {
-        addressParts.add(p.subLocality!);
-      }
-      if (p.locality != null && p.locality!.isNotEmpty) {
-        addressParts.add(p.locality!);
-      }
-      if (p.subAdministrativeArea != null &&
-          p.subAdministrativeArea!.isNotEmpty) {
-        addressParts.add(p.subAdministrativeArea!);
-      }
-      if (p.administrativeArea != null && p.administrativeArea!.isNotEmpty) {
-        addressParts.add(p.administrativeArea!);
-      }
-      if (p.country != null && p.country!.isNotEmpty) {
-        addressParts.add(p.country!);
-      }
-    }
-
-    final address = addressParts.isNotEmpty
-        ? addressParts.join(', ')
-        : '📍 ${lat.toStringAsFixed(6)}, ${lng.toStringAsFixed(6)}';
-
-    final newEntry = LocationEntry(
-      timestamp: updatedAtStr != null
-          ? DateTime.tryParse(updatedAtStr) ?? DateTime.now()
-          : DateTime.now(),
-      latitude: lat,
-      longitude: lng,
-      accuracy: accuracy,
-      address: address,
-      street: placemark?.street ?? '',
-      locality: placemark?.locality ?? '',
-      city: placemark?.administrativeArea ?? '',
-      country: placemark?.country ?? '',
-    );
 
     if (mounted) {
       setState(() {
         _isLive = live;
         _waitingForFirstLocation = false;
-        _lastLat = lat;
-        _lastLng = lng;
-        _locationList.insert(0, newEntry);
+        _currentLat = lat;
+        _currentLng = lng;
+        _currentAccuracy = accuracy;
+        _currentAddress = address;
+        _lastUpdated = updatedTime ?? DateTime.now();
+
+        _updateMapMarkers(lat, lng);
       });
     }
   }
 
-  double _calculateDistance(
-    double lat1,
-    double lon1,
-    double lat2,
-    double lon2,
-  ) {
-    const earthRadius = 6371000;
-    final dLat = _toRadians(lat2 - lat1);
-    final dLon = _toRadians(lon2 - lon1);
-    final a =
-        sin(dLat / 2) * sin(dLat / 2) +
-        cos(_toRadians(lat1)) *
-            cos(_toRadians(lat2)) *
-            sin(dLon / 2) *
-            sin(dLon / 2);
-    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
-    return earthRadius * c;
+  void _updateMapMarkers(double lat, double lng) {
+    final marker = Marker(
+      markerId: const MarkerId('user_location'),
+      position: LatLng(lat, lng),
+      icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+      infoWindow: InfoWindow(
+        title: widget.userName,
+        snippet: 'Last active: ${_formatTime(_lastUpdated)}',
+      ),
+    );
+
+    _markers.clear();
+    _markers.add(marker);
+
+    if (_shouldFollowUser && _mapController != null) {
+      _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: LatLng(lat, lng), zoom: 16),
+        ),
+      );
+    }
   }
 
-  double _toRadians(double degree) => degree * pi / 180;
+  String _formatTime(DateTime? dt) {
+    if (dt == null) return '';
+    return DateFormat('hh:mm:ss a').format(dt);
+  }
 
   @override
   void dispose() {
     _subscription?.cancel();
     _pollingTimer?.cancel();
+    _mapController?.dispose();
     super.dispose();
   }
 
@@ -262,365 +214,248 @@ class _AdminLiveLocationListScreenState
     return Scaffold(
       backgroundColor: AppColors.scaffoldBackground,
       appBar: AppBar(
-        toolbarHeight: 100,
-        elevation: 4,
-        shadowColor: AppColors.primary.withValues(alpha: 0.3),
+        toolbarHeight: 0, // Collapse appbar, we'll use a custom overlay
         backgroundColor: AppColors.primary,
         systemOverlayStyle: SystemUiOverlayStyle.light,
-        leadingWidth: 70,
-        leading: Padding(
-          padding: const EdgeInsets.only(left: 10),
-          child: IconButton(
-            icon: const Icon(
-              Icons.arrow_back_ios_new_rounded,
-              color: Colors.white,
+      ),
+      body: Stack(
+        children: [
+          // 1. THE MAP
+          _waitingForFirstLocation
+              ? const Center(child: CircularProgressIndicator())
+              : GoogleMap(
+                  initialCameraPosition: CameraPosition(
+                    target: LatLng(_currentLat ?? 0, _currentLng ?? 0),
+                    zoom: 15,
+                  ),
+                  markers: _markers,
+                  myLocationEnabled: false,
+                  myLocationButtonEnabled: false,
+                  zoomControlsEnabled: false,
+                  onMapCreated: (controller) {
+                    _mapController = controller;
+                    // Force initial camera update if we have data
+                    if (_currentLat != null && _currentLng != null) {
+                      _mapController!.moveCamera(
+                        CameraUpdate.newLatLngZoom(
+                          LatLng(_currentLat!, _currentLng!),
+                          16,
+                        ),
+                      );
+                    }
+                  },
+                ),
+
+          // 2. HEADER OVERLAY
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Container(
+              padding: EdgeInsets.only(
+                top: MediaQuery.of(context).padding.top + 10,
+                bottom: 20,
+                left: 20,
+                right: 20,
+              ),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Colors.black.withOpacity(0.8), Colors.transparent],
+                ),
+              ),
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      color: Colors.white,
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                  const SizedBox(width: 8),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.userName.toUpperCase(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: _isLive ? AppColors.accent : Colors.red,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _isLive ? 'LIVE' : 'OFFLINE',
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.8),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.refresh, color: Colors.white, size: 14),
+                        SizedBox(width: 4),
+                        Text(
+                          '5s',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
-            onPressed: () => Navigator.pop(context),
           ),
-        ),
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: AppColors.ktGradient,
-            borderRadius: BorderRadius.only(
-              bottomLeft: Radius.circular(20),
-              bottomRight: Radius.circular(20),
-            ),
-          ),
-        ),
-        centerTitle: false,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Live Location Feed',
-              style: AppTextStyle.titleMediumStyle(
-                context,
-              ).copyWith(fontWeight: FontWeight.w600, color: Colors.white),
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: _isLive ? AppColors.accent : Colors.red,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      if (_isLive)
-                        BoxShadow(
-                          color: AppColors.accent.withOpacity(0.5),
-                          blurRadius: 5,
-                          spreadRadius: 2,
+
+          // 3. BOTTOM INFO CARD
+          Positioned(
+            bottom: 30,
+            left: 20,
+            right: 20,
+            child: Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 20,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        "CURRENT LOCATION",
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _shouldFollowUser = !_shouldFollowUser;
+                          });
+                          if (_shouldFollowUser && _currentLat != null) {
+                            _mapController?.animateCamera(
+                              CameraUpdate.newLatLng(
+                                LatLng(_currentLat!, _currentLng!),
+                              ),
+                            );
+                          }
+                        },
+                        child: Icon(
+                          _shouldFollowUser
+                              ? Icons.gps_fixed
+                              : Icons.gps_not_fixed,
+                          color: _shouldFollowUser
+                              ? AppColors.primary
+                              : Colors.grey,
+                          size: 20,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    _currentAddress,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                      color: Colors.black87,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      _buildInfoChip(
+                        Icons.access_time_filled_rounded,
+                        _lastUpdated != null
+                            ? DateFormat('hh:mm:ss a').format(_lastUpdated!)
+                            : '--:--',
+                      ),
+                      const SizedBox(width: 10),
+                      if (_currentAccuracy != null)
+                        _buildInfoChip(
+                          Icons.radar,
+                          '±${_currentAccuracy!.toStringAsFixed(0)}m',
                         ),
                     ],
                   ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  widget.userName.toUpperCase(),
-                  style: AppTextStyle.labelMediumStyle(context).copyWith(
-                    color: Colors.white.withValues(alpha: 0.8),
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 20, bottom: 10),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.2),
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.timer_outlined, color: Colors.white, size: 18),
-                  SizedBox(width: 4),
-                  Text(
-                    '5s',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
                 ],
               ),
             ),
           ),
         ],
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.only(
-            bottomLeft: Radius.circular(30),
-            bottomRight: Radius.circular(30),
-          ),
-        ),
-      ),
-      body: !_isLive && _locationList.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(
-                    Icons.location_off_rounded,
-                    size: 60,
-                    color: Colors.grey,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'User is Offline',
-                    style: AppTextStyle.titleMediumStyle(
-                      context,
-                    ).copyWith(color: Colors.grey),
-                  ),
-                ],
-              ),
-            )
-          : _waitingForFirstLocation
-          ? const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  CircularProgressIndicator(color: AppColors.primary),
-                  SizedBox(height: 16),
-                  Text('Fetching live data...'),
-                ],
-              ),
-            )
-          : _buildLocationList(),
-    );
-  }
-
-  Widget _buildLocationList() {
-    return Column(
-      children: [
-        Container(
-          margin: const EdgeInsets.all(16),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.05),
-                blurRadius: 10,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.radar_rounded,
-                color: _isLive ? AppColors.primary : Colors.grey,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _isLive ? 'Live Tracking Active' : 'Tracking Inactive',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: _isLive ? AppColors.primary : Colors.grey,
-                      ),
-                    ),
-                    const Text(
-                      'Refreshing every 5 seconds',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
-              Text(
-                'POINTS: ${_locationList.length}',
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                  color: AppColors.primary,
-                ),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: RefreshIndicator(
-            onRefresh: _fetchLiveSnapshotFirst,
-            child: _locationList.isEmpty
-                ? ListView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    children: const [
-                      SizedBox(height: 200),
-                      Center(child: Text('Waiting for movement...')),
-                    ],
-                  )
-                : ListView.builder(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: _locationList.length,
-                    itemBuilder: (context, index) {
-                      final displayIndex = _locationList.length - index;
-                      final entry = _locationList[index];
-                      final isLatest = index == 0;
-                      return _buildLocationCard(entry, displayIndex, isLatest);
-                    },
-                  ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildLocationCard(
-    LocationEntry entry,
-    int displayIndex,
-    bool isLatest,
-  ) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: isLatest && _isLive
-            ? Border.all(color: AppColors.primary, width: 2)
-            : null,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    'Update #$displayIndex',
-                    style: const TextStyle(
-                      color: AppColors.primary,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12,
-                    ),
-                  ),
-                ),
-                Text(
-                  DateFormat('hh:mm:ss a').format(entry.timestamp),
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              entry.address,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                _buildInfoChip(
-                  Icons.gps_fixed_rounded,
-                  '${entry.latitude.toStringAsFixed(5)}, ${entry.longitude.toStringAsFixed(5)}',
-                ),
-                const SizedBox(width: 8),
-                if (entry.accuracy != null)
-                  _buildInfoChip(
-                    Icons.location_on_rounded,
-                    '±${entry.accuracy!.toStringAsFixed(1)}m',
-                  ),
-              ],
-            ),
-            if (isLatest && _isLive) ...[
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                decoration: BoxDecoration(
-                  color: AppColors.primary,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Center(
-                  child: Text(
-                    'LATEST POSITION',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
       ),
     );
   }
 
   Widget _buildInfoChip(IconData icon, String label) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: AppColors.cardBackground,
-        borderRadius: BorderRadius.circular(6),
+        color: AppColors.scaffoldBackground,
+        borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 12, color: Colors.grey),
-          const SizedBox(width: 4),
-          Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          Icon(icon, size: 14, color: AppColors.primary),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              color: Colors.black54,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
         ],
       ),
     );
   }
-}
-
-class LocationEntry {
-  final DateTime timestamp;
-  final double latitude;
-  final double longitude;
-  final double? accuracy;
-  final String address;
-  final String street;
-  final String locality;
-  final String city;
-  final String country;
-
-  LocationEntry({
-    required this.timestamp,
-    required this.latitude,
-    required this.longitude,
-    this.accuracy,
-    required this.address,
-    required this.street,
-    required this.locality,
-    required this.city,
-    required this.country,
-  });
 }

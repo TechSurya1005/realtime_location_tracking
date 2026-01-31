@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "346459500307",
+    "project_id": "native-location-engine",
+    "storage_bucket": "native-location-engine.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:346459500307:android:655cce833c1f9fd68074e6",
+        "android_client_info": {
+          "package_name": "com.bch.bchmarketing"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAXOhIaEG7wz7CkgjgvKy1RrSszL73zTvk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

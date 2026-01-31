@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:realtime_location_tracking/core/services/location_foreground_service.dart';
+import 'package:realtime_location_tracking/core/services/native_location_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:realtime_location_tracking/app/constants/AppKeys.dart';
@@ -22,9 +24,6 @@ class LocationController extends ChangeNotifier {
   bool get liveShareRunning => _liveShareRunning;
 
   StreamSubscription<Position>? _foregroundSubscription;
-
-  Position? _lastSavedPosition;
-  DateTime? _lastSavedTime;
 
   // =====================================================
   // 🔐 PERMISSION HANDLER
@@ -46,34 +45,11 @@ class LocationController extends ChangeNotifier {
       return false;
     }
 
-    if (permission == LocationPermission.whileInUse) {
-      // Ask user to allow "All time"
-      await showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text('Allow Background Location'),
-          content: const Text(
-            'To share live location even when the app is closed or not in use, '
-            'please set location permission to "Allow all the time" in Settings.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                Geolocator.openAppSettings();
-              },
-              child: const Text('Open Settings'),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-              child: const Text('Not Now'),
-            ),
-          ],
-        ),
-      );
+    // Android 10+ needs 'Always Allow' for background location to work reliably
+    // although our Foreground Service bypasses some of this, 'Always Allow' is best for Resume.
+    if (Platform.isAndroid && permission == LocationPermission.whileInUse) {
+      // We can guide them, but Foreground Service works with WhileInUse as long as it starts when app is visible.
+      // However, for maximum durability ("Uber-like"), Always is preferred.
     }
 
     return true;
@@ -85,12 +61,23 @@ class LocationController extends ChangeNotifier {
   void _startForegroundTracking() {
     if (_foregroundSubscription != null) return;
 
-    _foregroundSubscription = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 20,
-      ),
-    ).listen(saveLiveShareLocation);
+    // We still keep a foreground listener to update best-effort UI instantly
+    _foregroundSubscription =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.bestForNavigation,
+            distanceFilter: 10,
+          ),
+        ).listen((position) {
+          _lat = position.latitude;
+          _lng = position.longitude;
+          _accuracy = position.accuracy;
+          notifyListeners();
+          // We DO NOT save to DB here to avoid double-writes with Native Service
+          // Native Service is the "Source of Truth" for DB.
+          // OR: We can save if we want faster updates when open.
+          // Let's rely on Native Service for consistent history to avoid duplicates.
+        });
   }
 
   void _stopForegroundTracking() {
@@ -108,6 +95,18 @@ class LocationController extends ChangeNotifier {
 
     final allowed = await _checkPermission(context);
     if (!allowed) return;
+
+    // 🔋 REQUEST BATTERY OPTIMIZATION IGNORE (Critical for long running bg service)
+    if (Platform.isAndroid) {
+      final batteryStatus = await Permission.ignoreBatteryOptimizations
+          .request();
+      if (batteryStatus.isDenied) {
+        debugPrint(
+          "User denied battery optimization ignore. Service might be killed.",
+        );
+        // Optional: Show dialog explaining why
+      }
+    }
 
     final pos = await Geolocator.getCurrentPosition(
       locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
@@ -133,71 +132,11 @@ class LocationController extends ChangeNotifier {
     _liveShareRunning = true;
     notifyListeners();
 
-    // Start local foreground subscription
+    // Start local foreground subscription for UI
     _startForegroundTracking();
 
-    // Start service for background
-    await LocationForegroundService.instance.start();
-  }
-
-  // =====================================================
-  // 📡 LOCATION UPDATE (APP & SERVICE UPDATED)
-  // =====================================================
-  Future<void> saveLiveShareLocation(Position position) async {
-    try {
-      if (position.accuracy > 25) return;
-
-      final now = DateTime.now();
-      if (_lastSavedTime != null &&
-          now.difference(_lastSavedTime!).inSeconds < 10)
-        return;
-
-      if (_lastSavedPosition != null) {
-        final dist = Geolocator.distanceBetween(
-          _lastSavedPosition!.latitude,
-          _lastSavedPosition!.longitude,
-          position.latitude,
-          position.longitude,
-        );
-        if (dist < 20) return;
-      }
-
-      final prefs = await SharedPreferences.getInstance();
-      final authUid = prefs.getString(AppKeys.userAuthUid);
-      if (authUid == null) return;
-
-      // UPDATE MAIN USERS TABLE
-      await _supabase
-          .from('users')
-          .update({
-            'live_lat': position.latitude,
-            'live_lng': position.longitude,
-            'live_accuracy': position.accuracy,
-            'live_updated_at': now.toIso8601String(),
-          })
-          .eq('auth_uid', authUid);
-
-      // INSERT HISTORY
-      await _supabase.from('location_history').insert({
-        'user_auth_uid': authUid,
-        'latitude': position.latitude,
-        'longitude': position.longitude,
-        'accuracy': position.accuracy,
-        'speed': position.speed,
-        'heading': position.heading,
-        'full_address': '', // you can add geocoding if needed
-      });
-
-      _lastSavedPosition = position;
-      _lastSavedTime = now;
-
-      _lat = position.latitude;
-      _lng = position.longitude;
-      _accuracy = position.accuracy;
-      notifyListeners();
-    } catch (e) {
-      debugPrint('❌ saveLiveShareLocation error: $e');
-    }
+    // 🚀 START NATIVE SERVICE (The Real Deal)
+    await NativeLocationService.start();
   }
 
   // =====================================================
@@ -225,6 +164,8 @@ class LocationController extends ChangeNotifier {
     notifyListeners();
 
     _stopForegroundTracking();
-    await LocationForegroundService.instance.stop();
+
+    // 🛑 STOP NATIVE SERVICE
+    await NativeLocationService.stop();
   }
 }

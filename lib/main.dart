@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:firebase_core/firebase_core.dart';
 
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
@@ -16,74 +17,9 @@ import 'package:realtime_location_tracking/features/admin/admin_controller.dart'
 import 'package:realtime_location_tracking/features/location/location_controller.dart';
 import 'package:realtime_location_tracking/features/admin/location_history_controller.dart';
 import 'package:realtime_location_tracking/features/profile/profile_controller.dart';
-
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-
-import 'package:flutter_background_geolocation/flutter_background_geolocation.dart'
-    as bg;
 import 'package:realtime_location_tracking/app/constants/AppKeys.dart';
-
-@pragma('vm:entry-point')
-void backgroundGeolocationHeadlessTask(bg.HeadlessEvent event) async {
-  if (event.name != bg.Event.LOCATION) return;
-
-  final bg.Location location = event.event;
-
-  await Supabase.initialize(
-    url: AppText.supbaseDatabaseUrl,
-    anonKey: AppText.supbaseDatabaseAnonKey,
-  );
-
-  final prefs = await SharedPreferences.getInstance();
-  final authUid = prefs.getString(AppKeys.userAuthUid);
-  if (authUid == null || authUid.isEmpty) return;
-
-  final supabase = Supabase.instance.client;
-  final nowIso = DateTime.now().toIso8601String();
-
-  // ⚠️ Minimal geocoding in headless
-  String fullAddress = '';
-
-  try {
-    final placemarks = await placemarkFromCoordinates(
-      location.coords.latitude,
-      location.coords.longitude,
-    );
-    if (placemarks.isNotEmpty) {
-      final p = placemarks.first;
-      fullAddress = [
-        p.thoroughfare,
-        p.subLocality,
-        p.locality,
-        p.administrativeArea,
-        p.country,
-      ].where((e) => e != null && e!.isNotEmpty).join(', ');
-    }
-  } catch (_) {}
-
-  await supabase
-      .from('users')
-      .update({
-        'live_lat': location.coords.latitude,
-        'live_lng': location.coords.longitude,
-        'live_accuracy': location.coords.accuracy,
-        'live_updated_at': nowIso,
-        'is_live_sharing': true,
-      })
-      .eq('auth_uid', authUid);
-
-  await supabase.from('location_history').insert({
-    'user_auth_uid': authUid,
-    'latitude': location.coords.latitude,
-    'longitude': location.coords.longitude,
-    'accuracy': location.coords.accuracy,
-    'speed': location.coords.speed,
-    'heading': location.coords.heading,
-    'full_address': fullAddress,
-    'created_at': nowIso,
-  });
-}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -106,9 +42,13 @@ Future<void> main() async {
         ?.createNotificationChannel(channel);
   }
 
-  bg.BackgroundGeolocation.registerHeadlessTask(
-    backgroundGeolocationHeadlessTask,
-  );
+  try {
+    await Firebase.initializeApp();
+  } catch (e) {
+    debugPrint(
+      "Firebase init failed (expected if google-services.json missing): $e",
+    );
+  }
 
   await Supabase.initialize(
     url: AppText.supbaseDatabaseUrl,
