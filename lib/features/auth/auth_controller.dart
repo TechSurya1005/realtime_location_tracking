@@ -60,6 +60,46 @@ class AuthController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> changePassword(String oldPass, String newPass) async {
+    _setLoading(true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString(AppKeys.userId);
+
+      if (userId == null) throw Exception("User not logged in");
+
+      // Hash old password to verify
+      final oldHash = sha256.convert(utf8.encode(oldPass)).toString();
+
+      // Check if old password is correct
+      final user = await Supabase.instance.client
+          .from('users')
+          .select('id')
+          .eq('id', userId)
+          .eq('password', oldHash)
+          .maybeSingle();
+
+      if (user == null) {
+        throw Exception("Incorrect old password");
+      }
+
+      // Hash new password
+      final newHash = sha256.convert(utf8.encode(newPass)).toString();
+
+      // Update password
+      await Supabase.instance.client
+          .from('users')
+          .update({'password': newHash})
+          .eq('id', userId);
+
+      return true;
+    } catch (e) {
+      rethrow;
+    } finally {
+      _setLoading(false);
+    }
+  }
+
   void _setLoading(bool value) {
     _loading = value;
     notifyListeners();

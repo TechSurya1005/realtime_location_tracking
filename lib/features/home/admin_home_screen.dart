@@ -7,6 +7,7 @@ import 'package:realtime_location_tracking/app/theme/AppColors.dart';
 import 'package:realtime_location_tracking/app/theme/AppTextStyles.dart';
 import 'package:realtime_location_tracking/app/theme/themeExtension.dart';
 import 'package:realtime_location_tracking/features/admin/admin_controller.dart';
+import 'package:realtime_location_tracking/features/auth/auth_controller.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 class AdminHomeScreen extends StatefulWidget {
@@ -285,82 +286,133 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
     final formKey = GlobalKey<FormState>();
     final oldPassController = TextEditingController();
     final newPassController = TextEditingController();
+    String? dialogError;
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Change Password'),
-        content: Form(
-          key: formKey,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextFormField(
-                controller: oldPassController,
-                obscureText: true,
-                decoration: InputDecoration(
-                  labelText: 'Old Password',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                validator: (value) => value == null || value.isEmpty
-                    ? 'Enter old password'
-                    : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: newPassController,
-                obscureText: true,
-                decoration: InputDecoration(
-                  labelText: 'New Password',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty)
-                    return 'Enter new password';
-                  if (value.length < 6) return 'Min 6 chars required';
-                  return null;
-                },
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (formKey.currentState!.validate()) {
-                // TODO: Call API to change password
-                final oldPass = oldPassController.text;
-                final newPass = newPassController.text;
-                debugPrint("Changing password from $oldPass to $newPass");
-
-                // Simulate success
-                Navigator.pop(ctx);
-                final height = MediaQuery.of(context).size.height;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: const Text('Password changed successfully'),
-                    behavior: SnackBarBehavior.floating,
-                    margin: EdgeInsets.only(
-                      bottom: height - 100,
-                      left: 20,
-                      right: 20,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) => Consumer<AuthController>(
+          builder: (context, authCtrl, _) {
+            return AlertDialog(
+              title: const Text('Change Password'),
+              content: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: oldPassController,
+                      obscureText: true,
+                      enabled: !authCtrl.loading,
+                      decoration: InputDecoration(
+                        labelText: 'Old Password',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      validator: (value) => value == null || value.isEmpty
+                          ? 'Enter old password'
+                          : null,
                     ),
-                    backgroundColor: Colors.green,
-                  ),
-                );
-              }
-            },
-            child: const Text('Change'),
-          ),
-        ],
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: newPassController,
+                      obscureText: true,
+                      enabled: !authCtrl.loading,
+                      decoration: InputDecoration(
+                        labelText: 'New Password',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      validator: (value) {
+                        if (value == null || value.isEmpty)
+                          return 'Enter new password';
+                        if (value.length < 6) return 'Min 6 chars required';
+                        return null;
+                      },
+                    ),
+                    if (dialogError != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        dialogError!,
+                        style: const TextStyle(
+                          color: Colors.red,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: authCtrl.loading ? null : () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: authCtrl.loading
+                      ? null
+                      : () async {
+                          if (formKey.currentState!.validate()) {
+                            final oldPass = oldPassController.text;
+                            final newPass = newPassController.text;
+
+                            try {
+                              setState(() => dialogError = null);
+                              final success = await authCtrl.changePassword(
+                                oldPass,
+                                newPass,
+                              );
+
+                              if (success) {
+                                if (context.mounted) {
+                                  Navigator.pop(ctx);
+                                  final height = MediaQuery.of(
+                                    context,
+                                  ).size.height;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: const Text(
+                                        'Password changed successfully',
+                                      ),
+                                      behavior: SnackBarBehavior.floating,
+                                      margin: EdgeInsets.only(
+                                        bottom: height - 150,
+                                        left: 20,
+                                        right: 20,
+                                      ),
+                                      backgroundColor: Colors.green,
+                                    ),
+                                  );
+                                }
+                              }
+                            } catch (e) {
+                              setState(() {
+                                dialogError = e.toString().replaceAll(
+                                  'Exception: ',
+                                  '',
+                                );
+                              });
+                            }
+                          }
+                        },
+                  child: authCtrl.loading
+                      ? SizedBox(
+                          height: 18.h,
+                          width: 18.h,
+                          child: const CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text('Change'),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
@@ -523,7 +575,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
                         content: const Text('Creating user...'),
                         behavior: SnackBarBehavior.floating,
                         margin: EdgeInsets.only(
-                          bottom: height - 100,
+                          bottom: height - 150,
                           left: 20,
                           right: 20,
                         ),
@@ -543,7 +595,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
                             content: const Text('User created successfully!'),
                             behavior: SnackBarBehavior.floating,
                             margin: EdgeInsets.only(
-                              bottom: height - 100,
+                              bottom: height - 150,
                               left: 20,
                               right: 20,
                             ),
@@ -563,7 +615,7 @@ class _AdminHomeScreenState extends State<AdminHomeScreen> {
                             backgroundColor: Colors.red,
                             behavior: SnackBarBehavior.floating,
                             margin: EdgeInsets.only(
-                              bottom: height - 100,
+                              bottom: height - 150,
                               left: 20,
                               right: 20,
                             ),
